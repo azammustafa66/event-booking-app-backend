@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Event Booking API</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist/swagger-ui.css" />
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: sans-serif; background: #fafafa; }
+      #swagger-ui .topbar { background: #1a1a2e; }
+      #swagger-ui .topbar .download-url-wrapper { display: none; }
+    </style>
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+
+    <script src="https://unpkg.com/swagger-ui-dist/swagger-ui-bundle.js"></script>
+    <script>
+      const spec = {
+        openapi: "3.0.3",
+        info: {
+          title: "Event Booking API",
+          version: "1.0.0",
+          description:
+            "Role-gated REST API for an event booking platform. Organizers create and manage events; customers browse and book tickets. Background jobs (BullMQ + Redis) handle notification side-effects asynchronously.",
+          contact: { name: "Azam Mustufa" },
+        },
+        servers: [{ url: "/api/v1", description: "Local" }],
+
+        components: {
+          securitySchemes: {
+            cookieAuth: {
+              type: "apiKey",
+              in: "cookie",
+              name: "accessToken",
+            },
+          },
+          schemas: {
+            APIResponse: {
+              type: "object",
+              properties: {
+                statusCode: { type: "integer", example: 200 },
+                success: { type: "boolean", example: true },
+                message: { type: "string" },
+                data: { type: "object" },
+              },
+            },
+            APIError: {
+              type: "object",
+              properties: {
+                statusCode: { type: "integer", example: 400 },
+                success: { type: "boolean", example: false },
+                message: { type: "string" },
+                errors: { type: "object" },
+              },
+            },
+            User: {
+              type: "object",
+              properties: {
+                _id: { type: "string", example: "664f1a2b3c4d5e6f7a8b9c0d" },
+                name: { type: "string", example: "Jane Doe" },
+                email: { type: "string", format: "email", example: "jane@example.com" },
+                role: { type: "string", enum: ["organizer", "customer"] },
+              },
+            },
+            Event: {
+              type: "object",
+              properties: {
+                _id: { type: "string" },
+                title: { type: "string", example: "Summer Music Festival" },
+                description: { type: "string" },
+                date: { type: "string", format: "date-time" },
+                venue: { type: "string", example: "Central Park, NYC" },
+                totalTickets: { type: "integer", example: 500 },
+                availableTickets: { type: "integer", example: 342 },
+                pricePerTicket: { type: "number", example: 49.99 },
+                organizer: { type: "string", example: "664f1a2b3c4d5e6f7a8b9c0d" },
+                status: { type: "string", enum: ["upcoming", "cancelled"] },
+                createdAt: { type: "string", format: "date-time" },
+              },
+            },
+            Booking: {
+              type: "object",
+              properties: {
+                _id: { type: "string" },
+                event: { type: "object", description: "Populated event (title, date, venue)" },
+                customer: { type: "string" },
+                ticketsBooked: { type: "integer", example: 2 },
+                totalAmount: { type: "number", example: 99.98 },
+                status: { type: "string", enum: ["booked", "cancelled"] },
+                createdAt: { type: "string", format: "date-time" },
+              },
+            },
+          },
+        },
+
+        security: [{ cookieAuth: [] }],
+
+        tags: [
+          { name: "Auth", description: "Registration, login, token management" },
+          { name: "Events", description: "Organizer event management" },
+          { name: "Tickets", description: "Customer ticket booking" },
+        ],
+
+        paths: {
+          "/auth/register": {
+            post: {
+              tags: ["Auth"],
+              summary: "Register",
+              security: [],
+              requestBody: {
+                required: true,
+                content: {
+                  "application/json": {
+                    schema: {
+                      type: "object",
+                      required: ["name", "email", "password", "role"],
+                      properties: {
+                        name: { type: "string", example: "Jane Doe" },
+                        email: { type: "string", format: "email", example: "jane@example.com" },
+                        password: { type: "string", minLength: 8, maxLength: 16, example: "secret123" },
+                        role: { type: "string", enum: ["organizer", "customer"] },
+                      },
+                    },
+                  },
+                },
+              },
+              responses: {
+                201: {
+                  description: "User created — queues registration confirmation email",
+                  content: {
+                    "application/json": {
+                      schema: {
+                        allOf: [
+                          { $ref: "#/components/schemas/APIResponse" },
+                          { properties: { data: { properties: { user: { $ref: "#/components/schemas/User" } } } } },
+                        ],
+                      },
+                    },
+                  },
+                },
+                409: { description: "Email already registered with this role" },
+                422: { description: "Validation error" },
+              },
+            },
+          },
+
+          "/auth/login": {
+            post: {
+              tags: ["Auth"],
+              summary: "Login",
+              security: [],
+              description: "Sets `accessToken` and `refreshToken` as httpOnly cookies.",
+              requestBody: {
+                required: true,
+                content: {
+                  "application/json": {
+                    schema: {
+                      type: "object",
+                      required: ["email", "password"],
+                      properties: {
+                        email: { type: "string", format: "email", example: "jane@example.com" },
+                        password: { type: "string", example: "secret123" },
+                      },
+                    },
+                  },
+                },
+              },
+              responses: {
+                200: { description: "Logged in — access + refresh tokens set in cookies" },
+                401: { description: "Invalid credentials" },
+                404: { description: "User not found" },
+              },
+            },
+          },
+
+          "/auth/logout": {
+            post: {
+              tags: ["Auth"],
+              summary: "Logout",
+              description: "Clears cookies and invalidates the refresh token in the database.",
+              responses: {
+                200: { description: "Logged out" },
+                401: { description: "Unauthorized" },
+              },
+            },
+          },
+
+          "/auth/refresh-token": {
+            post: {
+              tags: ["Auth"],
+              summary: "Rotate tokens",
+              description: "Issues a new access token and refresh token. The old refresh token is invalidated immediately.",
+              responses: {
+                200: { description: "Tokens rotated — new cookies set" },
+                401: { description: "Refresh token invalid or expired" },
+              },
+            },
+          },
+
+          "/event/create-event": {
+            post: {
+              tags: ["Events"],
+              summary: "Create event",
+              description: "Organizer only.",
+              requestBody: {
+                required: true,
+                content: {
+                  "application/json": {
+                    schema: {
+                      type: "object",
+                      required: ["title", "date", "venue", "totalTickets", "availableTickets", "pricePerTicket"],
+                      properties: {
+                        title: { type: "string", example: "Summer Music Festival" },
+                        description: { type: "string" },
+                        date: { type: "string", format: "date-time" },
+                        venue: { type: "string", example: "Central Park, NYC" },
+                        totalTickets: { type: "integer", minimum: 50, example: 500 },
+                        availableTickets: { type: "integer", example: 500 },
+                        pricePerTicket: { type: "number", example: 49.99 },
+                      },
+                    },
+                  },
+                },
+              },
+              responses: {
+                201: {
+                  description: "Event created — confirmation email queued",
+                  content: {
+                    "application/json": {
+                      schema: {
+                        allOf: [
+                          { $ref: "#/components/schemas/APIResponse" },
+                          { properties: { data: { properties: { event: { $ref: "#/components/schemas/Event" } } } } },
+                        ],
+                      },
+                    },
+                  },
+                },
+                400: { description: "Missing required fields" },
+                403: { description: "Not an organizer" },
+              },
+            },
+          },
+
+          "/event/all-events": {
+            get: {
+              tags: ["Events"],
+              summary: "List own events",
+              description: "Returns all events created by the authenticated organizer.",
+              responses: {
+                200: {
+                  description: "Events fetched",
+                  content: {
+                    "application/json": {
+                      schema: {
+                        allOf: [
+                          { $ref: "#/components/schemas/APIResponse" },
+                          { properties: { data: { properties: { events: { type: "array", items: { $ref: "#/components/schemas/Event" } } } } } },
+                        ],
+                      },
+                    },
+                  },
+                },
+                403: { description: "Not an organizer" },
+              },
+            },
+          },
+
+          "/event/bookings": {
+            get: {
+              tags: ["Events"],
+              summary: "View all bookings across own events",
+              description: "Aggregates every booking for every event the organizer owns.",
+              responses: {
+                200: {
+                  description: "Bookings fetched",
+                  content: {
+                    "application/json": {
+                      schema: {
+                        allOf: [
+                          { $ref: "#/components/schemas/APIResponse" },
+                          { properties: { data: { properties: { bookings: { type: "array", items: { $ref: "#/components/schemas/Booking" } } } } } },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+
+          "/event/{eventId}": {
+            patch: {
+              tags: ["Events"],
+              summary: "Update event",
+              description: "Organizer (owner) only. Send only the fields you want to change.",
+              parameters: [
+                { name: "eventId", in: "path", required: true, schema: { type: "string" } },
+              ],
+              requestBody: {
+                content: {
+                  "application/json": {
+                    schema: {
+                      type: "object",
+                      properties: {
+                        title: { type: "string" },
+                        description: { type: "string" },
+                        date: { type: "string", format: "date-time" },
+                        venue: { type: "string" },
+                        totalTickets: { type: "integer" },
+                        availableTickets: { type: "integer" },
+                        pricePerTicket: { type: "number" },
+                        status: { type: "string", enum: ["upcoming", "cancelled"] },
+                      },
+                    },
+                  },
+                },
+              },
+              responses: {
+                200: { description: "Event updated" },
+                400: { description: "No valid fields provided" },
+                403: { description: "Not the organizer of this event" },
+                404: { description: "Event not found" },
+              },
+            },
+            delete: {
+              tags: ["Events"],
+              summary: "Cancel event",
+              description: "Organizer (owner) only. Soft-deletes the event and all its bookings. Customers are notified via background job.",
+              parameters: [
+                { name: "eventId", in: "path", required: true, schema: { type: "string" } },
+              ],
+              responses: {
+                200: { description: "Event cancelled — customer notification emails queued" },
+                403: { description: "Not the organizer of this event" },
+                404: { description: "Event not found" },
+              },
+            },
+          },
+
+          "/tickets/{eventId}": {
+            post: {
+              tags: ["Tickets"],
+              summary: "Book tickets",
+              description: "Customer only. Ticket availability is decremented atomically using `$inc` to prevent overbooking under concurrent requests. Confirmation email is queued on success.",
+              parameters: [
+                { name: "eventId", in: "path", required: true, schema: { type: "string" } },
+              ],
+              requestBody: {
+                required: true,
+                content: {
+                  "application/json": {
+                    schema: {
+                      type: "object",
+                      required: ["noOfTicketsToBook"],
+                      properties: {
+                        noOfTicketsToBook: { type: "integer", minimum: 1, example: 2 },
+                      },
+                    },
+                  },
+                },
+              },
+              responses: {
+                201: {
+                  description: "Tickets booked — confirmation email queued",
+                  content: {
+                    "application/json": {
+                      schema: {
+                        allOf: [
+                          { $ref: "#/components/schemas/APIResponse" },
+                          { properties: { data: { properties: { details: { $ref: "#/components/schemas/Booking" } } } } },
+                        ],
+                      },
+                    },
+                  },
+                },
+                400: { description: "Not enough tickets available or event cancelled" },
+                403: { description: "Not a customer" },
+              },
+            },
+            patch: {
+              tags: ["Tickets"],
+              summary: "Cancel tickets",
+              description: "Customer only. Partial cancellation supported — if remaining tickets > 0 the booking stays active. Availability is restored by the cancelled count.",
+              parameters: [
+                { name: "eventId", in: "path", required: true, schema: { type: "string" } },
+              ],
+              requestBody: {
+                required: true,
+                content: {
+                  "application/json": {
+                    schema: {
+                      type: "object",
+                      required: ["ticketsToCancel"],
+                      properties: {
+                        ticketsToCancel: { type: "integer", minimum: 1, example: 1 },
+                      },
+                    },
+                  },
+                },
+              },
+              responses: {
+                200: { description: "Tickets cancelled — availability restored" },
+                400: { description: "Cannot cancel more tickets than booked" },
+                404: { description: "No active booking found" },
+              },
+            },
+          },
+
+          "/tickets/all-tickets": {
+            get: {
+              tags: ["Tickets"],
+              summary: "View own bookings",
+              description: "Customer only. Returns all bookings with populated event details.",
+              responses: {
+                200: {
+                  description: "Bookings fetched",
+                  content: {
+                    "application/json": {
+                      schema: {
+                        allOf: [
+                          { $ref: "#/components/schemas/APIResponse" },
+                          { properties: { data: { properties: { bookings: { type: "array", items: { $ref: "#/components/schemas/Booking" } } } } } },
+                        ],
+                      },
+                    },
+                  },
+                },
+                403: { description: "Not a customer" },
+              },
+            },
+          },
+        },
+      };
+
+      SwaggerUIBundle({
+        spec,
+        dom_id: "#swagger-ui",
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+        layout: "BaseLayout",
+        tryItOutEnabled: true,
+      });
+    </script>
+  </body>
+</html>

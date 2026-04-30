@@ -1,6 +1,7 @@
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express from 'express';
+import path from 'path';
 
 import { mainRouter } from './routes';
 
@@ -19,6 +20,7 @@ app.use(
   cookieParser(),
 );
 app.use('/api/v1', mainRouter);
+app.use('/docs', express.static(path.join(import.meta.dir, '..', 'public')));
 
 app.get('/', (_req, res, _next) =>
   res.status(200).json({
