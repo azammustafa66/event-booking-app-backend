@@ -26,6 +26,7 @@ ENV NODE_ENV=production
 # Ensure your Bun app listens on this port (usually defaults to 3000 if not set).
 ENV PORT=3000
 EXPOSE $PORT
+RUN mkdir logs && chown bun:bun logs
 
 # Run the app
 # Replace 'index.ts' with your actual entry point if it's different
